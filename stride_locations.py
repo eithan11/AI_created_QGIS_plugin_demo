@@ -1,4 +1,4 @@
-# Save this code as 'get_stride_data_duration_qgs.py'
+# Save this code as 'get_stride_data_duration_progress.py'
 
 from qgis.PyQt.QtCore import QCoreApplication, QDateTime, Qt, QVariant, QUrl, QEventLoop
 from qgis.PyQt.QtNetwork import QNetworkRequest
@@ -21,9 +21,8 @@ from qgis.core import (QgsProcessing,
                        QgsWkbTypes,
                        QgsCoordinateReferenceSystem,
                        QgsCoordinateTransform,
-                       QgsNetworkAccessManager) # <--- IMPORT QgsNetworkAccessManager
+                       QgsNetworkAccessManager)
 
-# urllib.request is no longer needed
 import urllib.parse
 import json
 
@@ -46,10 +45,10 @@ class GetStrideDataDurationAlgo(QgsProcessingAlgorithm):
         return GetStrideDataDurationAlgo()
 
     def name(self):
-        return 'getstridedataduration'
+        return 'getstridedatadurationwithprogress'
 
     def displayName(self):
-        return self.tr('Get Open Bus Stride Data (by Duration)')
+        return self.tr('Get Open Bus Stride Data (with Download Progress)')
 
     def group(self):
         return self.tr('Web')
@@ -60,9 +59,9 @@ class GetStrideDataDurationAlgo(QgsProcessingAlgorithm):
     def shortHelpString(self):
         return self.tr("""
         Fetches vehicle location data using a start time and a duration in minutes.
+        This version uses QgsNetworkAccessManager and provides real-time feedback
+        on the download progress before processing the data.
         The output layer will be in the Israel Grid (EPSG:2039) CRS.
-        The script uses a field schema optimized for vehicle location data.
-        This version uses QgsNetworkAccessManager for network requests.
         """)
 
     def initAlgorithm(self, config=None):
@@ -130,25 +129,29 @@ class GetStrideDataDurationAlgo(QgsProcessingAlgorithm):
         iso_format = "yyyy-MM-ddTHH:mm:ss.zzz'Z'"
         if start_time.isValid():
             params['recorded_at_time_from'] = start_time.toString(iso_format)
-            feedback.pushInfo(self.tr(f'Filtering from start time: {params["recorded_at_time_from"]}'))
-            
             if duration_minutes > 0:
                 end_time = start_time.addSecs(duration_minutes * 60)
                 params['recorded_at_time_to'] = end_time.toString(iso_format)
-                feedback.pushInfo(self.tr(f'Calculated end time: {params["recorded_at_time_to"]}'))
-            
+
         query_string = urllib.parse.urlencode(params, safe=':')
         url = QUrl(f"{base_url}{api_path}")
         url.setQuery(query_string)
         
         feedback.pushInfo(self.tr(f'Requesting data from: {url.toString()}'))
+        feedback.pushInfo(self.tr('Phase 1/2: Downloading data...'))
 
-        # --- MODIFIED: Use QgsNetworkAccessManager instead of urllib ---
         manager = QgsNetworkAccessManager.instance()
         request = QNetworkRequest(url)
         reply = manager.get(request)
 
-        # Use an event loop to wait for the reply to finish (makes the call synchronous)
+        # --- MODIFIED: Connect downloadProgress signal to update the progress bar ---
+        # The first 50% of the progress bar is for the download.
+        reply.downloadProgress.connect(
+            lambda bytesReceived, bytesTotal:
+                # Check if total size is known, otherwise progress cannot be shown.
+                feedback.setProgress(int(50 * bytesReceived / bytesTotal)) if bytesTotal > 0 else None
+        )
+
         loop = QEventLoop()
         reply.finished.connect(loop.quit)
         loop.exec_()
@@ -169,14 +172,16 @@ class GetStrideDataDurationAlgo(QgsProcessingAlgorithm):
         except json.JSONDecodeError as e:
             raise QgsProcessingException(self.tr(f"Failed to parse JSON response: {e}"))
         finally:
-            # Ensure the reply object is cleaned up to prevent memory leaks
             reply.deleteLater()
-        # --- END MODIFICATION ---
         
         if not isinstance(data, list) or not data:
             feedback.pushInfo(self.tr("Response did not contain a list of items or was empty."))
             return {self.OUTPUT: None}
         
+        # --- MODIFIED: Set progress to 50% after download is complete ---
+        feedback.setProgress(50)
+        feedback.pushInfo(self.tr('Phase 2/2: Processing features...'))
+
         final_fields = QgsFields()
         field_definitions = [
             ('id', QVariant.LongLong), ('snapshot_id', QVariant.LongLong), ('ride_stop_id', QVariant.LongLong),
@@ -239,6 +244,10 @@ class GetStrideDataDurationAlgo(QgsProcessingAlgorithm):
             
             feature.setAttributes(attributes)
             sink.addFeature(feature, QgsFeatureSink.FastInsert)
-            feedback.setProgress(int((i + 1) / total * 100))
+
+            # --- MODIFIED: Remap processing progress to the 50-100% range ---
+            # This ensures the progress bar moves smoothly from download to processing.
+            progress = 50 + int((i + 1) / total * 50)
+            feedback.setProgress(progress)
 
         return {self.OUTPUT: dest_id}
