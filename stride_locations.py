@@ -1,12 +1,13 @@
-# Save this code as 'get_stride_data_duration.py'
+# Save this code as 'get_stride_data_duration_qgs.py'
 
-from qgis.PyQt.QtCore import QCoreApplication, QDateTime, Qt, QVariant
+from qgis.PyQt.QtCore import QCoreApplication, QDateTime, Qt, QVariant, QUrl, QEventLoop
+from qgis.PyQt.QtNetwork import QNetworkRequest
 from qgis.core import (QgsProcessing,
                        QgsProcessingAlgorithm,
                        QgsProcessingParameterString,
                        QgsProcessingParameterExtent,
                        QgsProcessingParameterDateTime,
-                       QgsProcessingParameterNumber, # <--- IMPORT Number Parameter
+                       QgsProcessingParameterNumber,
                        QgsProcessingParameterFeatureSink,
                        QgsProcessingException,
                        QgsVectorLayer,
@@ -19,9 +20,10 @@ from qgis.core import (QgsProcessing,
                        QgsPointXY,
                        QgsWkbTypes,
                        QgsCoordinateReferenceSystem,
-                       QgsCoordinateTransform)
+                       QgsCoordinateTransform,
+                       QgsNetworkAccessManager) # <--- IMPORT QgsNetworkAccessManager
 
-import urllib.request
+# urllib.request is no longer needed
 import urllib.parse
 import json
 
@@ -34,7 +36,7 @@ class GetStrideDataDurationAlgo(QgsProcessingAlgorithm):
     INPUT_PARAMS = 'INPUT_PARAMS'
     INPUT_EXTENT = 'INPUT_EXTENT'
     INPUT_START_TIME = 'INPUT_START_TIME'
-    INPUT_DURATION = 'INPUT_DURATION' # <--- NEW Constant
+    INPUT_DURATION = 'INPUT_DURATION'
     OUTPUT = 'OUTPUT'
 
     def tr(self, string):
@@ -60,6 +62,7 @@ class GetStrideDataDurationAlgo(QgsProcessingAlgorithm):
         Fetches vehicle location data using a start time and a duration in minutes.
         The output layer will be in the Israel Grid (EPSG:2039) CRS.
         The script uses a field schema optimized for vehicle location data.
+        This version uses QgsNetworkAccessManager for network requests.
         """)
 
     def initAlgorithm(self, config=None):
@@ -78,8 +81,6 @@ class GetStrideDataDurationAlgo(QgsProcessingAlgorithm):
                 self.INPUT_START_TIME, self.tr('Start Time (UTC)'),
                 optional=True
             ))
-            
-        # --- MODIFIED: Replaced End Time with Duration ---
         self.addParameter(
             QgsProcessingParameterNumber(
                 self.INPUT_DURATION,
@@ -89,7 +90,6 @@ class GetStrideDataDurationAlgo(QgsProcessingAlgorithm):
                 minValue=1,
                 optional=True
             ))
-            
         self.addParameter(
             QgsProcessingParameterString(
                 self.INPUT_PARAMS,
@@ -108,7 +108,6 @@ class GetStrideDataDurationAlgo(QgsProcessingAlgorithm):
         extent = self.parameterAsExtent(parameters, self.INPUT_EXTENT, context)
         extent_crs = self.parameterAsExtentCrs(parameters, self.INPUT_EXTENT, context)
         start_time = self.parameterAsDateTime(parameters, self.INPUT_START_TIME, context)
-        # --- MODIFIED: Get duration as an integer ---
         duration_minutes = self.parameterAsInt(parameters, self.INPUT_DURATION, context)
 
         params = {}
@@ -128,30 +127,51 @@ class GetStrideDataDurationAlgo(QgsProcessingAlgorithm):
             params['lat__greater_or_equal'] = extent_wgs84.yMinimum()
             params['lat__lower_or_equal'] = extent_wgs84.yMaximum()
 
-        # --- MODIFIED: Calculate end time from start time and duration ---
         iso_format = "yyyy-MM-ddTHH:mm:ss.zzz'Z'"
         if start_time.isValid():
             params['recorded_at_time_from'] = start_time.toString(iso_format)
             feedback.pushInfo(self.tr(f'Filtering from start time: {params["recorded_at_time_from"]}'))
             
-            # Only calculate end time if duration is a positive number
             if duration_minutes > 0:
                 end_time = start_time.addSecs(duration_minutes * 60)
                 params['recorded_at_time_to'] = end_time.toString(iso_format)
                 feedback.pushInfo(self.tr(f'Calculated end time: {params["recorded_at_time_to"]}'))
             
         query_string = urllib.parse.urlencode(params, safe=':')
-        full_url = f"{base_url}{api_path}?{query_string}"
-        feedback.pushInfo(self.tr(f'Requesting data from: {full_url}'))
+        url = QUrl(f"{base_url}{api_path}")
+        url.setQuery(query_string)
+        
+        feedback.pushInfo(self.tr(f'Requesting data from: {url.toString()}'))
 
+        # --- MODIFIED: Use QgsNetworkAccessManager instead of urllib ---
+        manager = QgsNetworkAccessManager.instance()
+        request = QNetworkRequest(url)
+        reply = manager.get(request)
+
+        # Use an event loop to wait for the reply to finish (makes the call synchronous)
+        loop = QEventLoop()
+        reply.finished.connect(loop.quit)
+        loop.exec_()
+        
+        data = []
         try:
-            with urllib.request.urlopen(full_url) as response:
-                if response.status != 200:
-                    raise QgsProcessingException(
-                        self.tr(f"API request failed with status code {response.status}: {response.reason}"))
-                data = json.loads(response.read().decode('utf-8'))
-        except Exception as e:
-            raise QgsProcessingException(self.tr(f"Failed to fetch or parse data: {e}"))
+            if reply.error():
+                raise QgsProcessingException(self.tr(f"Network request failed: {reply.errorString()}"))
+
+            status_code = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
+            if status_code != 200:
+                raise QgsProcessingException(
+                    self.tr(f"API request failed with HTTP status code {status_code}"))
+            
+            response_body = reply.readAll()
+            data = json.loads(bytes(response_body).decode('utf-8'))
+
+        except json.JSONDecodeError as e:
+            raise QgsProcessingException(self.tr(f"Failed to parse JSON response: {e}"))
+        finally:
+            # Ensure the reply object is cleaned up to prevent memory leaks
+            reply.deleteLater()
+        # --- END MODIFICATION ---
         
         if not isinstance(data, list) or not data:
             feedback.pushInfo(self.tr("Response did not contain a list of items or was empty."))
