@@ -244,17 +244,14 @@ class StringlinesDemoDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
         # open plot widget
         try:
             from .stringlines_plot_widget import PlotWidget
-            w = PlotWidget(parent=self)
+            # create as an independent top-level window (parent=None)
+            w = PlotWidget(parent=None)
             w.setWindowTitle("Stringlines Plot")
-            w.show()
+            # ensure window is deleted on close and keep a reference
+            w.setAttribute(Qt.WA_DeleteOnClose, True)
+            self._plot_window = w
             w.load_html(html)
-            # add docked widget in QGIS (non-modal). Use iface if available:
-            try:
-                from qgis.utils import iface
-                iface.addDockWidget(Qt.RightDockWidgetArea, w)
-            except Exception:
-                # fallback: just show as standalone window
-                pass
+            w.show()
             self.statusLabel.setText("Status: plot created")
         except Exception as e:
             QMessageBox.warning(self, "Plot window error", f"Failed to open plot window: {e}")
