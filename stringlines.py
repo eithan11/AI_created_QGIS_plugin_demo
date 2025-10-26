@@ -24,12 +24,15 @@
 from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
+from qgis.core import QgsApplication
 # Initialize Qt resources from file resources.py
 from .resources import *
 
 # Import the code for the DockWidget
 from .stringlines_dockwidget import StringlinesDemoDockWidget
 import os.path
+
+from .processing_provider import DemoPluginProvider
 
 
 class StringlinesDemo:
@@ -72,6 +75,8 @@ class StringlinesDemo:
 
         self.pluginIsActive = False
         self.dockwidget = None
+        self.provider = None
+        
 
 
     # noinspection PyMethodMayBeStatic
@@ -174,8 +179,11 @@ class StringlinesDemo:
             callback=self.run,
             parent=self.iface.mainWindow())
 
-    #--------------------------------------------------------------------------
-
+    def initProcessing(self):
+        """Init Processing provider for QGIS >= 3.8."""
+        self.provider = DemoPluginProvider()
+        QgsApplication.processingRegistry().addProvider(self.provider)
+        
     def onClosePlugin(self):
         """Cleanup necessary items here when plugin dockwidget is closed"""
 
@@ -198,6 +206,7 @@ class StringlinesDemo:
 
         #print "** UNLOAD StringlinesDemo"
 
+        QgsApplication.processingRegistry().removeProvider(self.provider)
         for action in self.actions:
             self.iface.removePluginMenu(
                 self.tr(u'&Stringlines Demo'),

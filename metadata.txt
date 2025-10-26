@@ -19,6 +19,9 @@ repository=http://repo
 # Recommended items:
 
 hasProcessingProvider=no
+# This plugin provides a Processing provider (exposes algorithms to the
+# QGIS Processing toolbox).
+hasProcessingProvider=yes
 # Uncomment the following line and add your changelog:
 # changelog=
 
