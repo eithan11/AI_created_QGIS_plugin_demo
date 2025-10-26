@@ -6,21 +6,117 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>232</width>
-    <height>141</height>
+    <width>360</width>
+    <height>320</height>
    </rect>
   </property>
   <property name="windowTitle">
    <string>Stringlines Demo</string>
   </property>
   <widget class="QWidget" name="dockWidgetContents">
-   <layout class="QGridLayout" name="gridLayout">
-    <item row="0" column="0">
-     <widget class="QLabel" name="label">
+   <layout class="QVBoxLayout" name="verticalLayout">
+    <item>
+     <layout class="QGridLayout" name="gridLayout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="label_points">
+        <property name="text">
+         <string>Points layer:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QComboBox" name="pointsLayerCombo"/>
+      </item>
+
+      <item row="1" column="0">
+       <widget class="QLabel" name="label_line">
+        <property name="text">
+         <string>Line layer:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QComboBox" name="lineLayerCombo"/>
+      </item>
+
+      <item row="2" column="0">
+       <widget class="QLabel" name="label_line_id">
+        <property name="text">
+         <string>Line feature id (fid):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QSpinBox" name="lineFeatureIdSpin">
+        <property name="minimum">
+         <number>0</number>
+        </property>
+        <property name="maximum">
+         <number>2147483647</number>
+        </property>
+       </widget>
+      </item>
+
+      <item row="3" column="0">
+       <widget class="QLabel" name="label_tolerance">
+        <property name="text">
+         <string>Snap tolerance (m):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="QDoubleSpinBox" name="toleranceSpin">
+        <property name="decimals">
+         <number>1</number>
+        </property>
+        <property name="minimum">
+         <double>0.0</double>
+        </property>
+        <property name="value">
+         <double>50.0</double>
+        </property>
+       </widget>
+      </item>
+
+      <item row="4" column="0">
+       <widget class="QLabel" name="label_time_field">
+        <property name="text">
+         <string>Time field:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="1">
+       <widget class="QComboBox" name="timeFieldCombo"/>
+      </item>
+
+      <item row="5" column="0">
+       <widget class="QLabel" name="label_train_field">
+        <property name="text">
+         <string>Train number field:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="5" column="1">
+       <widget class="QComboBox" name="trainFieldCombo"/>
+      </item>
+
+      <item row="6" column="0">
+       <widget class="QPushButton" name="refreshLayersButton">
+        <property name="text"><string>Refresh layers</string></property>
+       </widget>
+      </item>
+      <item row="6" column="1">
+       <widget class="QPushButton" name="createPlotButton">
+        <property name="text"><string>Create Plot</string></property>
+       </widget>
+      </item>
+     </layout>
+    </item>
+
+    <item>
+     <widget class="QLabel" name="statusLabel">
       <property name="text">
-       <string>Replace this QLabel
-with the desired
-plugin content.</string>
+       <string>Status: idle</string>
       </property>
      </widget>
     </item>

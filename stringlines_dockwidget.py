@@ -25,8 +25,15 @@
 import os
 
 from qgis.PyQt import QtGui, QtWidgets, uic
-from qgis.PyQt.QtCore import pyqtSignal
+from qgis.PyQt.QtCore import pyqtSignal, QDateTime, Qt
+# add imports
+from qgis.core import (
+    QgsProject, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
+    QgsFeatureRequest, QgsGeometry, QgsPointXY, QgsVectorLayer, QgsWkbTypes
+)
+from qgis.PyQt.QtWidgets import QMessageBox
 
+# UI loader unchanged
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'stringlines_dockwidget_base.ui'))
 
@@ -45,6 +52,210 @@ class StringlinesDemoDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
         # #widgets-and-dialogs-with-auto-connect
         self.setupUi(self)
 
+        # New: wire UI actions
+        self.refreshLayersButton.clicked.connect(self.populate_layers)
+        self.pointsLayerCombo.currentIndexChanged.connect(self.on_points_layer_changed)
+        self.createPlotButton.clicked.connect(self.on_create_plot)
+
+        # Keep references to layers
+        self._points_layer = None
+        self._line_layer = None
+
+        # initially populate
+        self.populate_layers()
+
     def closeEvent(self, event):
         self.closingPlugin.emit()
         event.accept()
+
+    # --- new methods ---
+    def populate_layers(self):
+        """Populate layer combo boxes with vector layers from the project."""
+        self.pointsLayerCombo.clear()
+        self.lineLayerCombo.clear()
+        layers = QgsProject.instance().mapLayers().values()
+        for layer in layers:
+            # keep only vector layers
+            if isinstance(layer, QgsVectorLayer):
+                display = f"{layer.name()} ({layer.id()})"
+                self.pointsLayerCombo.addItem(display, layer.id())
+                self.lineLayerCombo.addItem(display, layer.id())
+        self.statusLabel.setText("Status: layers refreshed")
+
+    def _layer_by_id(self, layer_id):
+        return QgsProject.instance().mapLayer(layer_id)
+
+    def on_points_layer_changed(self, idx):
+        """Populate field combos for the selected points layer."""
+        self.timeFieldCombo.clear()
+        self.trainFieldCombo.clear()
+        layer_id = self.pointsLayerCombo.itemData(idx)
+        if not layer_id:
+            return
+        layer = self._layer_by_id(layer_id)
+        if layer is None:
+            return
+        self._points_layer = layer
+        # Populate field names
+        for field in layer.fields():
+            self.timeFieldCombo.addItem(field.name())
+            self.trainFieldCombo.addItem(field.name())
+
+    def on_create_plot(self):
+        """Main routine: snap points to the chosen line, compute distance along line, and plot."""
+        # get selected layers
+        p_idx = self.pointsLayerCombo.currentIndex()
+        l_idx = self.lineLayerCombo.currentIndex()
+        if p_idx < 0 or l_idx < 0:
+            QMessageBox.warning(self, "Missing layers", "Please select both points and line layers.")
+            return
+
+        points_layer = self._layer_by_id(self.pointsLayerCombo.itemData(p_idx))
+        line_layer = self._layer_by_id(self.lineLayerCombo.itemData(l_idx))
+        if points_layer is None or line_layer is None:
+            QMessageBox.warning(self, "Layer error", "Could not access chosen layers.")
+            return
+
+        time_field = self.timeFieldCombo.currentText()
+        train_field = self.trainFieldCombo.currentText()
+        tolerance_m = float(self.toleranceSpin.value())
+        fid = int(self.lineFeatureIdSpin.value())
+
+        # prepare transform to EPSG:2039
+        dest_crs = QgsCoordinateReferenceSystem('EPSG:2039')
+        proj_ctx = QgsProject.instance().transformContext()
+        transform_points = QgsCoordinateTransform(points_layer.crs(), dest_crs, proj_ctx)
+        transform_line = QgsCoordinateTransform(line_layer.crs(), dest_crs, proj_ctx)
+
+        # get line feature (by fid if exists, otherwise first feature)
+        line_feat = line_layer.getFeature(fid)
+        if not line_feat.isValid():
+            # fallback to first
+            it = line_layer.getFeatures()
+            try:
+                line_feat = next(it)
+            except StopIteration:
+                QMessageBox.warning(self, "No features", "Line layer contains no features.")
+                return
+
+        line_geom = QgsGeometry(line_feat.geometry())
+        # transform line geometry to 2039
+        try:
+            line_geom.transform(transform_line)
+        except Exception:
+            QMessageBox.warning(self, "Transform error", "Failed to transform line geometry to EPSG:2039.")
+            return
+
+        if line_geom.isEmpty() or line_geom.type() != QgsWkbTypes.LineGeometry:
+            QMessageBox.warning(self, "Geometry error", "Selected feature is not a valid line geometry.")
+            return
+
+        self.statusLabel.setText("Status: snapping points...")
+        snapped_by_train = {}
+        total = points_layer.featureCount()
+        processed = 0
+
+        for feat in points_layer.getFeatures():
+            processed += 1
+            # update status simple
+            if processed % 100 == 0:
+                self.statusLabel.setText(f"Status: processing {processed}/{total}")
+
+            pt_geom = QgsGeometry(feat.geometry())
+            try:
+                pt_geom.transform(transform_points)
+            except Exception:
+                continue
+
+            if pt_geom.isEmpty():
+                continue
+
+            # compute distance to line
+            dist = line_geom.distance(pt_geom)
+            if dist > tolerance_m:
+                continue  # disregard non-snapped points
+
+            # compute location along line in map units
+            try:
+                # lineLocatePoint expects a point
+                point_xy = pt_geom.asPoint()
+                loc = line_geom.lineLocatePoint(QgsGeometry.fromPointXY(QgsPointXY(point_xy)))
+                # loc is distance along line in map units (meters in EPSG:2039)
+                dist_from_start = float(loc)
+            except Exception:
+                continue
+
+            # read time and train number
+            raw_time = feat[time_field] if time_field in feat.fields().names() else None
+            raw_train = feat[train_field] if train_field in feat.fields().names() else None
+
+            # parse time
+            py_dt = None
+            if isinstance(raw_time, QDateTime):
+                py_dt = raw_time.toPyDateTime()
+            else:
+                # try QDateTime parsing or Python isoformat
+                try:
+                    qdt = QDateTime.fromString(str(raw_time), Qt.ISODate)
+                    if qdt.isValid():
+                        py_dt = qdt.toPyDateTime()
+                    else:
+                        # last resort: attempt Python fromisoformat
+                        import datetime
+                        py_dt = datetime.datetime.fromisoformat(str(raw_time))
+                except Exception:
+                    continue  # skip points without valid time
+
+            key = raw_train if raw_train is not None else 'unknown'
+            snapped_by_train.setdefault(key, []).append((py_dt, dist_from_start))
+
+        if not snapped_by_train:
+            QMessageBox.information(self, "No snapped points", "No points were snapped to the line within the given tolerance.")
+            self.statusLabel.setText("Status: no snapped points")
+            return
+
+        # prepare plotly traces
+        try:
+            import plotly.graph_objects as go
+            import plotly.io as pio
+        except Exception as e:
+            QMessageBox.warning(self, "Plotly missing", f"Plotly is required: {e}")
+            return
+
+        fig = go.Figure()
+        for train, recs in snapped_by_train.items():
+            # sort by time
+            recs_sorted = sorted(recs, key=lambda x: x[0])
+            times = [r[0] for r in recs_sorted]
+            dists = [r[1] for r in recs_sorted]
+            # convert datetimes to ISO strings for plotly
+            times_iso = [t.isoformat() for t in times]
+            fig.add_trace(go.Scatter(x=times_iso, y=dists, mode='lines+markers', name=str(train)))
+
+        fig.update_layout(
+            title='Time vs Distance Along Line',
+            xaxis_title='Time',
+            yaxis_title='Distance from start (m)',
+            hovermode='closest'
+        )
+
+        html = pio.to_html(fig, include_plotlyjs='cdn', full_html=True)
+
+        # open plot widget
+        try:
+            from .stringlines_plot_widget import PlotWidget
+            w = PlotWidget(parent=self)
+            w.setWindowTitle("Stringlines Plot")
+            w.show()
+            w.load_html(html)
+            # add docked widget in QGIS (non-modal). Use iface if available:
+            try:
+                from qgis.utils import iface
+                iface.addDockWidget(Qt.RightDockWidgetArea, w)
+            except Exception:
+                # fallback: just show as standalone window
+                pass
+            self.statusLabel.setText("Status: plot created")
+        except Exception as e:
+            QMessageBox.warning(self, "Plot window error", f"Failed to open plot window: {e}")
+            return
