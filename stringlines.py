@@ -211,22 +211,38 @@ class StringlinesDemo:
     def run(self):
         """Run method that loads and starts the plugin"""
 
-        if not self.pluginIsActive:
-            self.pluginIsActive = True
+        # Toggle behavior: if plugin is active, close/remove the dockwidget; otherwise open it
+        if self.pluginIsActive:
+            try:
+                if self.dockwidget is not None:
+                    # remove from QGIS UI and close
+                    try:
+                        self.iface.removeDockWidget(self.dockwidget)
+                    except Exception:
+                        pass
+                    try:
+                        self.dockwidget.closingPlugin.disconnect(self.onClosePlugin)
+                    except Exception:
+                        pass
+                    try:
+                        self.dockwidget.close()
+                    except Exception:
+                        pass
+                    # keep reference if you want, but mark inactive
+                self.pluginIsActive = False
+            except Exception:
+                self.pluginIsActive = False
+            return
 
-            #print "** STARTING StringlinesDemo"
-
-            # dockwidget may not exist if:
-            #    first run of plugin
-            #    removed on close (see self.onClosePlugin method)
-            if self.dockwidget == None:
-                # Create the dockwidget (after translation) and keep reference
-                self.dockwidget = StringlinesDemoDockWidget()
-
-            # connect to provide cleanup on closing of dockwidget
+        # If not active, create and show dockwidget
+        self.pluginIsActive = True
+        if self.dockwidget is None:
+            self.dockwidget = StringlinesDemoDockWidget()
+        # ensure signal connected for cleanup
+        try:
             self.dockwidget.closingPlugin.connect(self.onClosePlugin)
-
-            # show the dockwidget
-            # TODO: fix to allow choice of dock location
-            self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dockwidget)
-            self.dockwidget.show()
+        except Exception:
+            pass
+        # show the dockwidget
+        self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dockwidget)
+        self.dockwidget.show()
