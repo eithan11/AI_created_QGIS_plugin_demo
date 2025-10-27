@@ -57,6 +57,24 @@ class StringlinesDemoDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
         self.pointsLayerCombo.currentIndexChanged.connect(self.on_points_layer_changed)
         self.createPlotButton.clicked.connect(self.on_create_plot)
 
+        # Add a direction selector (distance grows with time / decreases with time)
+        # Place it in the existing grid layout below the other controls so it can
+        # be easily accessed without editing the .ui file.
+        self.directionLabel = QtWidgets.QLabel("Direction:")
+        self.directionCombo = QtWidgets.QComboBox()
+        self.directionCombo.addItems(["Distance grows with time", "Distance decreases with time"])
+        # Add to grid layout (row 7, col 0/1). The .ui file uses rows 0..6, so row 7 is free.
+        try:
+            self.gridLayout.addWidget(self.directionLabel, 7, 0)
+            self.gridLayout.addWidget(self.directionCombo, 7, 1)
+        except Exception:
+            # If gridLayout is not present for some reason, fallback to adding to main layout
+            try:
+                self.verticalLayout.addWidget(self.directionLabel)
+                self.verticalLayout.addWidget(self.directionCombo)
+            except Exception:
+                pass
+
         # Keep references to layers
         self._points_layer = None
         self._line_layer = None
@@ -222,26 +240,53 @@ class StringlinesDemoDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
             QMessageBox.warning(self, "Plotly missing", f"Plotly is required: {e}")
             return
 
+        # Determine user selected direction: True => increasing (distance grows with time), False => decreasing
+        sel_idx = 0
+        try:
+            sel_idx = int(self.directionCombo.currentIndex())
+        except Exception:
+            sel_idx = 0
+        want_increasing = (sel_idx == 0)
+
         fig = go.Figure()
+        plotted = 0
+
+        def follows_direction(dlist, increasing=True):
+            # Requires at least two points to determine a direction
+            if not dlist or len(dlist) < 2:
+                return False
+            eps = 1e-6
+            if increasing:
+                return all((b - a) >= -eps for a, b in zip(dlist, dlist[1:]))
+            else:
+                return all((b - a) <= eps for a, b in zip(dlist, dlist[1:]))
+
         for train, recs in snapped_by_train.items():
             # sort by time
             recs_sorted = sorted(recs, key=lambda x: x[0])
             times = [r[0] for r in recs_sorted]
             dists = [r[1] for r in recs_sorted]
+
+            # Only include journeys that follow the selected direction
+            try:
+                if not follows_direction(dists, increasing=want_increasing):
+                    continue
+            except Exception:
+                # if anything goes wrong, skip this train
+                continue
+
             # convert datetimes to ISO strings for plotly
             times_iso = [t.isoformat() for t in times]
             fig.add_trace(go.Scatter(x=times_iso, y=dists, mode='lines+markers', name=str(train)))
+            plotted += 1
 
-        fig.update_layout(
-            title='Time vs Distance Along Line',
-            xaxis_title='Time',
-            yaxis_title='Distance from start (m)',
-            hovermode='closest'
-        )
+        if plotted == 0:
+            QMessageBox.information(self, "No journeys match", "No journeys match the selected direction filter.")
+            self.statusLabel.setText("Status: no journeys match direction")
+            return
 
+        # generate html for plotly figure
         html = pio.to_html(fig, include_plotlyjs='cdn', full_html=True)
-
-        # open plot widget
         try:
             from .stringlines_plot_widget import PlotWidget
             # create as an independent top-level window (parent=None)

@@ -171,7 +171,8 @@ class StringlinesDemo:
 
     def initGui(self):
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
-
+        self.initProcessing()
+        
         icon_path = ':/plugins/stringlines/icon.png'
         self.add_action(
             icon_path,
