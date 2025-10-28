@@ -198,14 +198,16 @@ class StringlinesDemoDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
             pass
 
     class FeatureListDialog(QtWidgets.QDialog):
-        """Dialog showing a simple list of features from a layer for the user to choose a feature id."""
+        """Dialog showing features from a layer with multiple field values in columns."""
         def __init__(self, layer, parent=None):
             super().__init__(parent)
             self.setWindowTitle("Select feature")
             self.resize(480, 320)
             layout = QtWidgets.QVBoxLayout(self)
-            self.list = QtWidgets.QListWidget()
-            layout.addWidget(self.list)
+            self.tree = QtWidgets.QTreeWidget()
+            self.tree.setRootIsDecorated(False)  # no expand/collapse icons needed
+            self.tree.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+            layout.addWidget(self.tree)
             buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
             layout.addWidget(buttons)
             buttons.accepted.connect(self.accept)
@@ -213,30 +215,45 @@ class StringlinesDemoDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
 
             self._id_map = []
             if layer is not None:
-                # try to provide a helpful label: use the first non-fid field if available
-                display_field = None
+                # set up columns: FID plus up to 3 non-geometry fields
+                headers = ["FID"]
+                display_fields = []
                 try:
-                    fields = [f.name() for f in layer.fields()]
-                    if fields:
-                        display_field = fields[0]
+                    for field in layer.fields():
+                        if len(display_fields) >= 3:
+                            break
+                        # skip geometry and numeric ID fields
+                        if field.type() not in [15, 16]:  # QVariant::LongLong, QVariant::Int
+                            display_fields.append(field.name())
+                            headers.append(field.name())
                 except Exception:
-                    display_field = None
+                    pass
+                self.tree.setHeaderLabels(headers)
 
                 for feat in layer.getFeatures():
                     try:
-                        label = str(feat.id())
-                        if display_field and display_field in feat.fields().names():
-                            label += f": {feat[display_field]}"
-                        self.list.addItem(label)
+                        item = QtWidgets.QTreeWidgetItem()
+                        item.setText(0, str(feat.id()))  # FID column
+                        # add values for the selected display fields
+                        for col, field in enumerate(display_fields, start=1):
+                            if field in feat.fields().names():
+                                item.setText(col, str(feat[field]))
+                        self.tree.addTopLevelItem(item)
                         self._id_map.append(feat.id())
                     except Exception:
                         continue
+                # auto-size columns
+                for i in range(len(headers)):
+                    self.tree.resizeColumnToContents(i)
 
         def selected_fid(self):
-            idx = self.list.currentRow()
-            if idx < 0 or idx >= len(self._id_map):
+            items = self.tree.selectedItems()
+            if not items:
                 return None
-            return self._id_map[idx]
+            idx = self.tree.indexOfTopLevelItem(items[0])
+            if idx >= 0 and idx < len(self._id_map):
+                return self._id_map[idx]
+            return None
 
     def start_feature_pick(self):
         """Activate a temporary map tool to pick a feature from the selected line layer."""
