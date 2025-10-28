@@ -10,7 +10,7 @@ version=0.1
 author=Eithan Weiss Schonberg
 email=eithan.schonberg@gmail.com
 
-about=demo of ai assisted creation of a plugin
+about=demo of ai assisted creation of a plugin for creating stringlines plots
 
 tracker=http://bugs
 repository=http://repo
@@ -18,7 +18,6 @@ repository=http://repo
 
 # Recommended items:
 
-hasProcessingProvider=no
 # This plugin provides a Processing provider (exposes algorithms to the
 # QGIS Processing toolbox).
 hasProcessingProvider=yes
