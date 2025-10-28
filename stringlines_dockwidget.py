@@ -29,9 +29,11 @@ from qgis.PyQt.QtCore import pyqtSignal, QDateTime, Qt
 # add imports
 from qgis.core import (
     QgsProject, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
-    QgsFeatureRequest, QgsGeometry, QgsPointXY, QgsVectorLayer, QgsWkbTypes
+    QgsFeatureRequest, QgsGeometry, QgsPointXY, QgsVectorLayer, QgsWkbTypes,
+    QgsRectangle
 )
-from qgis.PyQt.QtWidgets import QMessageBox
+from qgis.PyQt.QtWidgets import QMessageBox, QPushButton
+from qgis.gui import QgsMapLayerComboBox, QgsMapToolEmitPoint
 
 # UI loader unchanged
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
@@ -54,8 +56,45 @@ class StringlinesDemoDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
 
         # New: wire UI actions
         self.refreshLayersButton.clicked.connect(self.populate_layers)
-        self.pointsLayerCombo.currentIndexChanged.connect(self.on_points_layer_changed)
         self.createPlotButton.clicked.connect(self.on_create_plot)
+
+        # The UI now contains QgsMapLayerComboBox instances for layer selection.
+        # For backward compatibility, handle older UIs where these may still be simple QComboBox.
+        try:
+            # If the UI widget is a QgsMapLayerComboBox, connect its layerChanged signal.
+            if isinstance(self.pointsLayerCombo, QgsMapLayerComboBox):
+                try:
+                    self.pointsLayerCombo.layerChanged.connect(self.on_points_maplayer_changed)
+                except Exception:
+                    # fall back to index-based signal if needed
+                    try:
+                        self.pointsLayerCombo.currentIndexChanged.connect(self.on_points_layer_changed)
+                    except Exception:
+                        pass
+            # Similar for the line layer combo
+            if isinstance(self.lineLayerCombo, QgsMapLayerComboBox):
+                try:
+                    self.lineLayerCombo.layerChanged.connect(self.on_line_maplayer_changed)
+                except Exception:
+                    try:
+                        self.lineLayerCombo.currentIndexChanged.connect(self.on_line_maplayer_changed)
+                    except Exception:
+                        pass
+        except Exception:
+            # If the UI lacks these widgets for some reason, ignore and continue.
+            pass
+
+        # Add a "Pick feature" button next to the fid spin box so the user can pick a line feature
+        self.pickFeatureButton = QPushButton("Pick feature")
+        try:
+            self.gridLayout.addWidget(self.pickFeatureButton, 2, 2)
+        except Exception:
+            self.verticalLayout.addWidget(self.pickFeatureButton)
+        self.pickFeatureButton.clicked.connect(self.start_feature_pick)
+
+        # map-tool state holders
+        self._prev_map_tool = None
+        self._pick_tool = None
 
         # Add a direction selector (distance grows with time / decreases with time)
         # Place it in the existing grid layout below the other controls so it can
@@ -89,15 +128,25 @@ class StringlinesDemoDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
     # --- new methods ---
     def populate_layers(self):
         """Populate layer combo boxes with vector layers from the project."""
-        self.pointsLayerCombo.clear()
-        self.lineLayerCombo.clear()
-        layers = QgsProject.instance().mapLayers().values()
-        for layer in layers:
-            # keep only vector layers
-            if isinstance(layer, QgsVectorLayer):
-                display = f"{layer.name()} ({layer.id()})"
-                self.pointsLayerCombo.addItem(display, layer.id())
-                self.lineLayerCombo.addItem(display, layer.id())
+        # If the UI uses QgsMapLayerComboBox they manage available layers themselves.
+        # Otherwise (older UI) populate the plain QComboBox widgets.
+        try:
+            if isinstance(getattr(self, 'pointsLayerCombo', None), QgsMapLayerComboBox) or \
+               isinstance(getattr(self, 'lineLayerCombo', None), QgsMapLayerComboBox):
+                # nothing to do: the widget updates itself
+                pass
+            else:
+                self.pointsLayerCombo.clear()
+                self.lineLayerCombo.clear()
+                layers = QgsProject.instance().mapLayers().values()
+                for layer in layers:
+                    # keep only vector layers
+                    if isinstance(layer, QgsVectorLayer):
+                        display = str(layer.name())
+                        self.pointsLayerCombo.addItem(display, layer.id())
+                        self.lineLayerCombo.addItem(display, layer.id())
+        except Exception:
+            pass
         self.statusLabel.setText("Status: layers refreshed")
 
     def _layer_by_id(self, layer_id):
@@ -119,17 +168,153 @@ class StringlinesDemoDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
             self.timeFieldCombo.addItem(field.name())
             self.trainFieldCombo.addItem(field.name())
 
-    def on_create_plot(self):
-        """Main routine: snap points to the chosen line, compute distance along line, and plot."""
-        # get selected layers
-        p_idx = self.pointsLayerCombo.currentIndex()
-        l_idx = self.lineLayerCombo.currentIndex()
-        if p_idx < 0 or l_idx < 0:
-            QMessageBox.warning(self, "Missing layers", "Please select both points and line layers.")
+    def on_points_maplayer_changed(self, layer):
+        """Called when the points QgsMapLayerComboBox changes."""
+        # layer will be a QgsVectorLayer or None
+        if layer is None:
+            self._points_layer = None
+            self.timeFieldCombo.clear()
+            self.trainFieldCombo.clear()
+            return
+        self._points_layer = layer
+        self.timeFieldCombo.clear()
+        self.trainFieldCombo.clear()
+        for field in layer.fields():
+            self.timeFieldCombo.addItem(field.name())
+            self.trainFieldCombo.addItem(field.name())
+
+    def on_line_maplayer_changed(self, layer):
+        """Called when the line QgsMapLayerComboBox changes."""
+        if layer is None:
+            self._line_layer = None
+            return
+        self._line_layer = layer
+        # adjust fid spin maximum to a safe upper bound
+        try:
+            count = layer.featureCount()
+            if count > 0:
+                self.lineFeatureIdSpin.setMaximum(max(self.lineFeatureIdSpin.maximum(), count * 2))
+        except Exception:
+            pass
+
+    class FeatureListDialog(QtWidgets.QDialog):
+        """Dialog showing a simple list of features from a layer for the user to choose a feature id."""
+        def __init__(self, layer, parent=None):
+            super().__init__(parent)
+            self.setWindowTitle("Select feature")
+            self.resize(480, 320)
+            layout = QtWidgets.QVBoxLayout(self)
+            self.list = QtWidgets.QListWidget()
+            layout.addWidget(self.list)
+            buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+            layout.addWidget(buttons)
+            buttons.accepted.connect(self.accept)
+            buttons.rejected.connect(self.reject)
+
+            self._id_map = []
+            if layer is not None:
+                # try to provide a helpful label: use the first non-fid field if available
+                display_field = None
+                try:
+                    fields = [f.name() for f in layer.fields()]
+                    if fields:
+                        display_field = fields[0]
+                except Exception:
+                    display_field = None
+
+                for feat in layer.getFeatures():
+                    try:
+                        label = str(feat.id())
+                        if display_field and display_field in feat.fields().names():
+                            label += f": {feat[display_field]}"
+                        self.list.addItem(label)
+                        self._id_map.append(feat.id())
+                    except Exception:
+                        continue
+
+        def selected_fid(self):
+            idx = self.list.currentRow()
+            if idx < 0 or idx >= len(self._id_map):
+                return None
+            return self._id_map[idx]
+
+    def start_feature_pick(self):
+        """Activate a temporary map tool to pick a feature from the selected line layer."""
+        if not getattr(self, '_line_layer', None):
+            QMessageBox.warning(self, "No line layer", "Please select a line layer first.")
+            return
+        # open a simple feature-list dialog instead of using a map click picker
+        try:
+            dlg = StringlinesDemoDockWidget.FeatureListDialog(self._line_layer, parent=self)
+            if dlg.exec_() == QtWidgets.QDialog.Accepted:
+                fid = dlg.selected_fid()
+                if fid is not None:
+                    # reuse existing handler to set fid and zoom/select
+                    self.on_feature_picked(fid)
+                    return
+        except Exception:
+            QMessageBox.warning(self, "Feature list error", "Failed to open feature list dialog.")
             return
 
-        points_layer = self._layer_by_id(self.pointsLayerCombo.itemData(p_idx))
-        line_layer = self._layer_by_id(self.lineLayerCombo.itemData(l_idx))
+    def on_feature_picked(self, fid):
+        """Callback from the pick tool when the user clicked near a feature."""
+        try:
+            self.lineFeatureIdSpin.setValue(int(fid))
+        except Exception:
+            pass
+        if getattr(self, '_line_layer', None):
+            try:
+                self._line_layer.selectByIds([fid])
+                canvas = __import__('qgis.utils').iface.mapCanvas()
+                extent = self._line_layer.boundingBoxOfSelected()
+                if extent and not extent.isEmpty():
+                    canvas.setExtent(extent)
+                    canvas.refresh()
+            except Exception:
+                pass
+        # restore previous map tool
+        try:
+            canvas = __import__('qgis.utils').iface.mapCanvas()
+            if getattr(self, '_prev_map_tool', None) is not None:
+                canvas.setMapTool(self._prev_map_tool)
+        except Exception:
+            pass
+        self._pick_tool = None
+        self._prev_map_tool = None
+        self.statusLabel.setText("Status: feature picked")
+
+    def on_create_plot(self):
+        """Main routine: snap points to the chosen line, compute distance along line, and plot."""
+        # get selected layers: prefer the QgsMapLayerComboBox-backed layers if present
+        points_layer = getattr(self, '_points_layer', None)
+        line_layer = getattr(self, '_line_layer', None)
+
+        if points_layer is None:
+            # try to get layer from QgsMapLayerComboBox first
+            try:
+                points_layer = self.pointsLayerCombo.currentLayer()
+            except Exception:
+                try:
+                    p_idx = self.pointsLayerCombo.currentIndex()
+                    if p_idx < 0:
+                        QMessageBox.warning(self, "Missing layers", "Please select both points and line layers.")
+                        return
+                    points_layer = self._layer_by_id(self.pointsLayerCombo.itemData(p_idx))
+                except Exception:
+                    points_layer = None
+
+        if line_layer is None:
+            try:
+                line_layer = self.lineLayerCombo.currentLayer()
+            except Exception:
+                try:
+                    l_idx = self.lineLayerCombo.currentIndex()
+                    if l_idx < 0:
+                        QMessageBox.warning(self, "Missing layers", "Please select both points and line layers.")
+                        return
+                    line_layer = self._layer_by_id(self.lineLayerCombo.itemData(l_idx))
+                except Exception:
+                    line_layer = None
         if points_layer is None or line_layer is None:
             QMessageBox.warning(self, "Layer error", "Could not access chosen layers.")
             return
