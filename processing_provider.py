@@ -64,7 +64,7 @@ class DemoPluginProvider(QgsProcessingProvider):
         string should be a unique, short, character only string, eg "qgis" or
         "gdal". This string should not be localised.
         """
-        return 'LastMileToolbox'
+        return 'plugin_demo_tools'
 
     def name(self):
         """
@@ -73,15 +73,9 @@ class DemoPluginProvider(QgsProcessingProvider):
 
         This string should be short (e.g. "Lastools") and localised.
         """
-        return self.tr('Last Mile Toolbox')
+        return self.tr('plugin demo tools')
 
-    def icon(self):
-        """
-        Should return a QIcon which is used for your provider inside
-        the Processing toolbox.
-        """
-        icon_path = os.path.join(os.path.dirname(__file__), "LastMileLogo_no_txt.svg")
-        return QIcon(icon_path)
+
 
     def longName(self):
         """
