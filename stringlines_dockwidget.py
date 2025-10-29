@@ -32,6 +32,7 @@ from qgis.core import (
     QgsFeatureRequest, QgsGeometry, QgsPointXY, QgsVectorLayer, QgsWkbTypes,
     QgsRectangle
 )
+from qgis.core import Qgis
 from qgis.PyQt.QtWidgets import QMessageBox, QPushButton
 from qgis.gui import QgsMapLayerComboBox, QgsMapToolEmitPoint
 
@@ -64,6 +65,7 @@ class StringlinesDemoDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
             # If the UI widget is a QgsMapLayerComboBox, connect its layerChanged signal.
             if isinstance(self.pointsLayerCombo, QgsMapLayerComboBox):
                 try:
+                    self.pointsLayerCombo.setFilters(Qgis.LayerFilter.PointLayer)
                     self.pointsLayerCombo.layerChanged.connect(self.on_points_maplayer_changed)
                 except Exception:
                     # fall back to index-based signal if needed
@@ -74,6 +76,7 @@ class StringlinesDemoDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
             # Similar for the line layer combo
             if isinstance(self.lineLayerCombo, QgsMapLayerComboBox):
                 try:
+                    self.lineLayerCombo.setFilters(Qgis.LayerFilter.LineLayer)
                     self.lineLayerCombo.layerChanged.connect(self.on_line_maplayer_changed)
                 except Exception:
                     try:
@@ -434,24 +437,15 @@ class StringlinesDemoDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
             self.statusLabel.setText("Status: no snapped points")
             return
 
-        # prepare plotly traces
-        try:
-            import plotly.graph_objects as go
-            import plotly.io as pio
-        except Exception as e:
-            QMessageBox.warning(self, "Plotly missing", f"Plotly is required: {e}")
-            return
-
-        # Determine user selected direction: True => increasing (distance grows with time), False => decreasing
+        # Prepare data for charting (series list). We will pass this to PlotWidget
+        # which will prefer QgsLineChartPlotWidget and fall back to Plotly HTML.
+        # Determine user selected direction: True => increasing (distance grows with time)
         sel_idx = 0
         try:
             sel_idx = int(self.directionCombo.currentIndex())
         except Exception:
             sel_idx = 0
         want_increasing = (sel_idx == 0)
-
-        fig = go.Figure()
-        plotted = 0
 
         def follows_direction(dlist, increasing=True):
             # Requires at least two points to determine a direction
@@ -462,6 +456,9 @@ class StringlinesDemoDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
                 return all((b - a) >= -eps for a, b in zip(dlist, dlist[1:]))
             else:
                 return all((b - a) <= eps for a, b in zip(dlist, dlist[1:]))
+
+        series_data = []
+        plotted = 0
 
         for train, recs in snapped_by_train.items():
             # sort by time
@@ -474,12 +471,11 @@ class StringlinesDemoDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
                 if not follows_direction(dists, increasing=want_increasing):
                     continue
             except Exception:
-                # if anything goes wrong, skip this train
                 continue
 
-            # convert datetimes to ISO strings for plotly
+            # convert datetimes to ISO strings for plotting
             times_iso = [t.isoformat() for t in times]
-            fig.add_trace(go.Scatter(x=times_iso, y=dists, mode='lines+markers', name=str(train)))
+            series_data.append({'name': str(train), 'x': times_iso, 'y': dists})
             plotted += 1
 
         if plotted == 0:
@@ -487,17 +483,41 @@ class StringlinesDemoDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
             self.statusLabel.setText("Status: no journeys match direction")
             return
 
-        # generate html for plotly figure
-        html = pio.to_html(fig, include_plotlyjs='cdn', full_html=True)
+        # Optionally collect stop labels as y-axis ticks if a stops layer/field is provided.
+        yticks = None
+        try:
+            stops_layer = getattr(self, '_stops_layer', None)
+            if stops_layer is not None and hasattr(self, 'stopNameFieldCombo'):
+                stop_name_field = self.stopNameFieldCombo.currentText()
+                if stop_name_field:
+                    transform_stops = QgsCoordinateTransform(stops_layer.crs(), dest_crs, proj_ctx)
+                    stop_locations = []
+                    for stop in stops_layer.getFeatures():
+                        try:
+                            stop_geom = QgsGeometry(stop.geometry())
+                            stop_geom.transform(transform_stops)
+                            if stop_geom.isEmpty():
+                                continue
+                            point_xy = stop_geom.asPoint()
+                            loc = line_geom.lineLocatePoint(QgsGeometry.fromPointXY(QgsPointXY(point_xy)))
+                            name = stop[stop_name_field] if stop_name_field in stop.fields().names() else 'Unknown'
+                            stop_locations.append((float(loc), str(name)))
+                        except Exception:
+                            continue
+                    if stop_locations:
+                        stop_locations.sort(key=lambda x: x[0])
+                        yticks = ([loc for loc, _ in stop_locations], [name for _, name in stop_locations])
+        except Exception:
+            yticks = None
+
+        # create plot window and hand data to PlotWidget
         try:
             from .stringlines_plot_widget import PlotWidget
-            # create as an independent top-level window (parent=None)
             w = PlotWidget(parent=None)
             w.setWindowTitle("Stringlines Plot")
-            # ensure window is deleted on close and keep a reference
             w.setAttribute(Qt.WA_DeleteOnClose, True)
             self._plot_window = w
-            w.load_html(html)
+            w.load_chart({'series': series_data, 'yticks': yticks})
             w.show()
             self.statusLabel.setText("Status: plot created")
         except Exception as e:
